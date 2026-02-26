@@ -83,8 +83,27 @@ function extractSuggestions(data) {
 
 
 export default async function handler(req, res) {
-    // ── CORS ──────────────────────────────────────────────────────────────────
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // ── CORS & Security ──────────────────────────────────────────────────────
+    const origin = req.headers.origin;
+    const allowedOrigins = [
+        'http://localhost:5173',
+        'http://localhost:3000',
+    ];
+
+    // Allow requests with no origin (like mobile apps or curl) or from allowed list
+    // On Vercel, we also want to allow subdomains of the deployment
+    const isAllowed = !origin ||
+        allowedOrigins.includes(origin) ||
+        origin.endsWith('.vercel.app') ||
+        origin.includes('dayanaliatsabaq-eng');
+
+    if (isAllowed) {
+        res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    } else {
+        console.warn(`Blocked request from unauthorized origin: ${origin}`);
+        return res.status(403).json({ error: 'Access denied: Unauthorized origin' });
+    }
+
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 

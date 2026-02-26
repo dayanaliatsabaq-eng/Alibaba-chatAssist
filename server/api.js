@@ -85,6 +85,22 @@ function sendJson(res, data, status = 200) {
 export function createApiRouter() {
     return async (req, res, next) => {
         const url = new URL(req.url, `http://${req.headers.host}`)
+        const origin = req.headers.origin
+
+        // ── CORS ────────────────────────────────────────────────────────────────
+        const allowedOrigins = ['http://localhost:5173', 'http://localhost:3000']
+        const isAllowed = !origin || allowedOrigins.includes(origin)
+
+        if (isAllowed) {
+            res.setHeader('Access-Control-Allow-Origin', origin || '*')
+        }
+        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+        if (req.method === 'OPTIONS') {
+            res.statusCode = 200
+            return res.end()
+        }
 
         // ── POST /api/chat ──────────────────────────────────────────────────────────
         if (req.method === 'POST' && url.pathname === '/api/chat') {

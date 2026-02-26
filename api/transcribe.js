@@ -10,7 +10,25 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // ── CORS & Security ──────────────────────────────────────────────────────
+    const origin = req.headers.origin;
+    const allowedOrigins = [
+        'http://localhost:5173',
+        'http://localhost:3000',
+    ];
+
+    const isAllowed = !origin ||
+        allowedOrigins.includes(origin) ||
+        origin.endsWith('.vercel.app') ||
+        origin.includes('dayanaliatsabaq-eng');
+
+    if (isAllowed) {
+        res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    } else {
+        console.warn(`Blocked request from unauthorized origin: ${origin}`);
+        return res.status(403).json({ error: 'Access denied: Unauthorized origin' });
+    }
+
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 

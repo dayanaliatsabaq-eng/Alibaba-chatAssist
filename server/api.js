@@ -98,7 +98,7 @@ export function createApiRouter() {
                     console.error('N8N_WEBHOOK_URL not configured')
                     return sendJson(res, {
                         error: 'Server configuration error',
-                        response: 'Chat server is not configured yet. Please set N8N_WEBHOOK_URL in your .env file.'
+                        response: 'Chat server is not configured yet. Please check project environment variables.'
                     }, 500)
                 }
 

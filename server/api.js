@@ -1,5 +1,3 @@
-import express from 'express'
-
 // ─── Helper: fetch with timeout ─────────────────────────────────────────────
 async function fetchWithTimeout(url, options, timeoutMs = 55000) {
     const controller = new AbortController()
@@ -19,7 +17,6 @@ async function fetchWithRetry(url, options, { retries = 2, delayMs = 2000, timeo
         try {
             const response = await fetchWithTimeout(url, options, timeoutMs)
             if (response.status >= 500 && attempt < retries) {
-                const text = await response.text()
                 console.warn(`Attempt ${attempt} got ${response.status}, retrying in ${delayMs}ms`)
                 await new Promise(r => setTimeout(r, delayMs))
                 continue
@@ -60,138 +57,165 @@ function extractSuggestions(data) {
     return []
 }
 
-// ─── Create the Express API router ──────────────────────────────────────────
+// ─── JSON Body Parser Helper ────────────────────────────────────────────────
+function getBody(req) {
+    return new Promise((resolve, reject) => {
+        if (req.body) return resolve(req.body)
+        let body = ''
+        req.on('data', chunk => body += chunk)
+        req.on('end', () => {
+            try {
+                resolve(body ? JSON.parse(body) : {})
+            } catch (e) {
+                resolve({})
+            }
+        })
+        req.on('error', reject)
+    })
+}
+
+// ─── Response Helpers ───────────────────────────────────────────────────────
+function sendJson(res, data, status = 200) {
+    res.statusCode = status
+    res.setHeader('Content-Type', 'application/json')
+    res.end(JSON.stringify(data))
+}
+
+// ─── Main Middleware ────────────────────────────────────────────────────────
 export function createApiRouter() {
-    const router = express.Router()
-    router.use(express.json({ limit: '10mb' }))
+    return async (req, res, next) => {
+        const url = new URL(req.url, `http://${req.headers.host}`)
 
-    // ── POST /api/chat ──────────────────────────────────────────────────────────
-    router.post('/api/chat', async (req, res) => {
-        try {
-            const { message, timestamp, sessionId } = req.body || {}
-            if (!message) return res.status(400).json({ error: 'Message is required' })
+        // ── POST /api/chat ──────────────────────────────────────────────────────────
+        if (req.method === 'POST' && url.pathname === '/api/chat') {
+            try {
+                const body = await getBody(req)
+                const { message, timestamp, sessionId } = body || {}
+                if (!message) return sendJson(res, { error: 'Message is required' }, 400)
 
-            const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL
-            if (!n8nWebhookUrl) {
-                console.error('N8N_WEBHOOK_URL not configured in .env')
-                return res.status(500).json({
-                    error: 'Server configuration error',
-                    response: 'Chat server is not configured yet. Please set N8N_WEBHOOK_URL in your .env file.'
-                })
-            }
-
-            const n8nResponse = await fetchWithRetry(
-                n8nWebhookUrl,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        message,
-                        timestamp: timestamp || new Date().toISOString(),
-                        sessionId: sessionId || 'unknown'
-                    })
-                },
-                { retries: 2, delayMs: 2000, timeoutMs: 55000 }
-            )
-
-            const rawText = await n8nResponse.text()
-            if (!n8nResponse.ok) {
-                console.error(`n8n returned HTTP ${n8nResponse.status}:`, rawText.substring(0, 500))
-                throw new Error(`n8n webhook error: ${n8nResponse.status}`)
-            }
-
-            let data
-            try { data = JSON.parse(rawText) }
-            catch { throw new Error('Invalid JSON from n8n') }
-
-            const responseText = extractResponseText(data)
-            if (!responseText) throw new Error('No response text found in n8n payload')
-
-            const suggestions = extractSuggestions(data)
-            const payload = Array.isArray(data) ? data[0] : data
-            const returnedSessionId = payload?.sessionId || payload?.json?.sessionId || sessionId
-
-            return res.json({
-                response: responseText,
-                output: responseText,
-                text: responseText,
-                suggestions,
-                sessionId: returnedSessionId,
-                timestamp: payload?.timestamp || new Date().toISOString()
-            })
-
-        } catch (error) {
-            const isTimeout = error.name === 'AbortError' || error.message?.includes('abort')
-            console.error('Chat API error:', error.message)
-            const userMessage = isTimeout
-                ? "I'm taking a bit longer than usual — please send your message again."
-                : "I ran into a hiccup, please try again in a moment."
-            return res.status(500).json({ error: 'Failed to process message', message: error.message, response: userMessage })
-        }
-    })
-
-    // ── POST /api/transcribe ────────────────────────────────────────────────────
-    router.post('/api/transcribe', async (req, res) => {
-        try {
-            const { audio, mimeType } = req.body || {}
-            if (!audio) return res.status(400).json({ error: 'Audio data is required' })
-
-            const deepgramApiKey = process.env.DEEPGRAM_API_KEY
-            if (!deepgramApiKey) {
-                console.error('DEEPGRAM_API_KEY not configured in .env')
-                return res.status(500).json({ error: 'Server configuration error' })
-            }
-
-            let base64Data = audio
-            let detectedMimeType = mimeType || 'audio/webm;codecs=opus'
-
-            if (typeof audio === 'string' && audio.startsWith('data:')) {
-                const matches = audio.match(/^data:([^;]+);base64,(.+)$/)
-                if (matches) {
-                    detectedMimeType = matches[1]
-                    base64Data = matches[2]
-                } else {
-                    return res.status(400).json({ error: 'Malformed audio data URL' })
+                const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL
+                if (!n8nWebhookUrl) {
+                    console.error('N8N_WEBHOOK_URL not configured')
+                    return sendJson(res, {
+                        error: 'Server configuration error',
+                        response: 'Chat server is not configured yet. Please set N8N_WEBHOOK_URL in your .env file.'
+                    }, 500)
                 }
+
+                const n8nResponse = await fetchWithRetry(
+                    n8nWebhookUrl,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            message,
+                            timestamp: timestamp || new Date().toISOString(),
+                            sessionId: sessionId || 'unknown'
+                        })
+                    },
+                    { retries: 2, delayMs: 2000, timeoutMs: 55000 }
+                )
+
+                const rawText = await n8nResponse.text()
+                if (!n8nResponse.ok) {
+                    console.error(`n8n returned HTTP ${n8nResponse.status}:`, rawText.substring(0, 500))
+                    throw new Error(`n8n webhook error: ${n8nResponse.status}`)
+                }
+
+                let data
+                try { data = JSON.parse(rawText) }
+                catch { throw new Error('Invalid JSON from n8n') }
+
+                const responseText = extractResponseText(data)
+                if (!responseText) throw new Error('No response text found in n8n payload')
+
+                const suggestions = extractSuggestions(data)
+                const payload = Array.isArray(data) ? data[0] : data
+                const returnedSessionId = payload?.sessionId || payload?.json?.sessionId || sessionId
+
+                return sendJson(res, {
+                    response: responseText,
+                    output: responseText,
+                    text: responseText,
+                    suggestions,
+                    sessionId: returnedSessionId,
+                    timestamp: payload?.timestamp || new Date().toISOString()
+                })
+
+            } catch (error) {
+                const isTimeout = error.name === 'AbortError' || error.message?.includes('abort')
+                console.error('Chat API error:', error.message)
+                const userMessage = isTimeout
+                    ? "I'm taking a bit longer than usual — please send your message again."
+                    : "I ran into a hiccup, please try again in a moment."
+                return sendJson(res, { error: 'Failed to process message', message: error.message, response: userMessage }, 500)
             }
-
-            const audioBuffer = Buffer.from(base64Data, 'base64')
-            if (audioBuffer.length === 0) return res.status(400).json({ error: 'Audio buffer is empty' })
-
-            const baseType = detectedMimeType.split(';')[0].trim().toLowerCase()
-            const mimeMap = {
-                'audio/x-m4a': 'audio/mp4',
-                'audio/mpeg': 'audio/mp3',
-                'video/webm': 'audio/webm',
-                'video/mp4': 'audio/mp4',
-            }
-            const contentType = mimeMap[baseType] || baseType
-
-            const deepgramUrl = 'https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true&language=en'
-            const deepgramResponse = await fetch(deepgramUrl, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Token ${deepgramApiKey}`,
-                    'Content-Type': contentType,
-                },
-                body: audioBuffer
-            })
-
-            const rawText = await deepgramResponse.text()
-            if (!deepgramResponse.ok) throw new Error(`Deepgram API error: ${deepgramResponse.status}`)
-
-            let data
-            try { data = JSON.parse(rawText) }
-            catch { throw new Error('Invalid JSON from Deepgram') }
-
-            const transcript = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || ''
-            return res.json({ transcript, success: true })
-
-        } catch (error) {
-            console.error('Transcription error:', error.message)
-            return res.status(500).json({ error: 'Transcription failed', message: error.message })
         }
-    })
 
-    return router
+        // ── POST /api/transcribe ────────────────────────────────────────────────────
+        if (req.method === 'POST' && url.pathname === '/api/transcribe') {
+            try {
+                const body = await getBody(req)
+                const { audio, mimeType } = body || {}
+                if (!audio) return sendJson(res, { error: 'Audio data is required' }, 400)
+
+                const deepgramApiKey = process.env.DEEPGRAM_API_KEY
+                if (!deepgramApiKey) {
+                    console.error('DEEPGRAM_API_KEY not configured')
+                    return sendJson(res, { error: 'Server configuration error' }, 500)
+                }
+
+                let base64Data = audio
+                let detectedMimeType = mimeType || 'audio/webm;codecs=opus'
+
+                if (typeof audio === 'string' && audio.startsWith('data:')) {
+                    const matches = audio.match(/^data:([^;]+);base64,(.+)$/)
+                    if (matches) {
+                        detectedMimeType = matches[1]
+                        base64Data = matches[2]
+                    } else {
+                        return sendJson(res, { error: 'Malformed audio data URL' }, 400)
+                    }
+                }
+
+                const audioBuffer = Buffer.from(base64Data, 'base64')
+                if (audioBuffer.length === 0) return sendJson(res, { error: 'Audio buffer is empty' }, 400)
+
+                const baseType = detectedMimeType.split(';')[0].trim().toLowerCase()
+                const mimeMap = {
+                    'audio/x-m4a': 'audio/mp4',
+                    'audio/mpeg': 'audio/mp3',
+                    'video/webm': 'audio/webm',
+                    'video/mp4': 'audio/mp4',
+                }
+                const contentType = mimeMap[baseType] || baseType
+
+                const deepgramUrl = 'https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true&language=en'
+                const deepgramResponse = await fetch(deepgramUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Token ${deepgramApiKey}`,
+                        'Content-Type': contentType,
+                    },
+                    body: audioBuffer
+                })
+
+                const rawText = await deepgramResponse.text()
+                if (!deepgramResponse.ok) throw new Error(`Deepgram API error: ${deepgramResponse.status}`)
+
+                let data
+                try { data = JSON.parse(rawText) }
+                catch { throw new Error('Invalid JSON from Deepgram') }
+
+                const transcript = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || ''
+                return sendJson(res, { transcript, success: true })
+
+            } catch (error) {
+                console.error('Transcription error:', error.message)
+                return sendJson(res, { error: 'Transcription failed', message: error.message }, 500)
+            }
+        }
+
+        next()
+    }
 }

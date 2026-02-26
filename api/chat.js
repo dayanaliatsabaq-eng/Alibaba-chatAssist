@@ -103,6 +103,7 @@ export default async function handler(req, res) {
         if (!message) return res.status(400).json({ error: 'Message is required' });
 
         // ── Config ────────────────────────────────────────────────────────────
+        const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL;
         if (!n8nWebhookUrl) {
             console.error('N8N_WEBHOOK_URL not configured');
             return res.status(500).json({ error: 'Server configuration error' });
